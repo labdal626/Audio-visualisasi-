@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Audio Emotion Visualizer Pro</title>
+
+<style>
+  /* Reset dan gaya dasar */
+  * {
+    margin: 0; padding: 0; box-sizing: border-box;
+  }
+  body, html {
+    height: 100%; background: linear-gradient(135deg,#0f2027,#203a43,#2c5364);
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    color: #0ff;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+    overflow: hidden;
+  }
+
+  header {
+    padding: 1rem 2rem;
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-shadow: 0 0 5px #0ff, 0 0 10px #0ff;
+    user-select: none;
+  }
+
+  main {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: flex-start;
+    width: 95vw;
+    max-width: 1200px;
+    margin-top: 15px;
+    gap: 20px;
+  }
+
+  #threejs-container {
+    width: 600px;
+    height: 300px;
+    background: #111;
+    border-radius: 15px;
+    box-shadow: 0 0 20px #0ff;
+  }
+
+  #controls-panel {
+    width: 300px;
+    background: rgba(0, 255, 255, 0.15);
+    backdrop-filter: blur(10px);
+    border-radius: 15px;
+    box-shadow: 0 0 15px #0ff;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    user-select: none;
+  }
+
+  button {
+    padding: 12px 20px;
+    border-radius: 10px;
+    border: none;
+    background: #0ff;
+    font-weight: 700;
+    color: #022;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+  }
+  button:hover {
+    background-color: #00b7b7;
+  }
+
+  #emotion {
+    font-size: 1.5rem;
+    text-align: center;
+    padding: 10px;
+    background: rgba(0, 255, 255, 0.2);
+    border-radius: 10px;
+    box-shadow: inset 0 0 10px #0ff;
+  }
+
+  #history-chart {
+    width: 100%;
+    height: 150px;
+    background: #000;
+    border-radius: 12px;
+    box-shadow: 0 0 10px #0ff inset;
+  }
+
+  footer {
+    margin-top: auto;
+    padding: 1rem;
+    font-size: 0.9rem;
+    color: #0ff9;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+
+<header>🎙️ Audio Emotion Visualizer Pro</header>
+
+<main>
+  <div id="threejs-container"></div>
+
+  <div id="controls-panel">
+    <button id="startBtn">Mulai Analisis</button>
+    <button id="pauseBtn" disabled>Pause</button>
+    <div id="emotion">Emosi: -</div>
+    <canvas id="history-chart"></canvas>
+    <div id="recommendation" style="margin-top: 10px; font-style: italic; font-size: 1rem;"></div>
+  </div>
+</main>
+
+<footer>
+  Dibuat dengan HTML5, Web Audio API, TensorFlow.js & Three.js - Privasi Terjaga, Semua proses di browser.
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.0.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+
+<script>
+(async () => {
+  // Variables
+  const startBtn = document.getElementById('startBtn');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const emotionDisplay = document.getElementById('emotion');
+  const recommendationDiv = document.getElementById('recommendation');
+  const canvasHistory = document.getElementById('history-chart');
+  let audioContext, analyser, microphone, dataArray, source;
+  let animationId, paused = false;
+
+  // Setup Three.js Scene for 3D Spectrogram
+  const container = document.getElementById('threejs-container');
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 1000);
+  camera.position.set(0, 40, 80);
+  camera.lookAt(new THREE.Vector3(0,0,0));
+
+  const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  container.appendChild(renderer.domElement);
+
+  // Light
+  const ambientLight = new THREE.AmbientLight(0x0ff, 1);
+  scene.add(ambientLight);
+
+  // Create geometry for spectrogram bars
+  const barsCount = 64;
+  const bars = [];
+  const barGeometry = new THREE.BoxGeometry(1,1,1);
+  const barMaterial = new THREE.MeshStandardMaterial({color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity:0.7});
+  
+  for(let i=0; i<barsCount; i++){
+    const bar = new THREE.Mesh(barGeometry, barMaterial.clone());
+    bar.position.x = (i - barsCount/2) * 1.2;
+    bar.scale.y = 1;
+    scene.add(bar);
+    bars.push(bar);
+  }
+
+  // Resize Three.js on window resize
+  window.addEventListener('resize', () => {
+    camera.aspect = container.clientWidth / container.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(container.clientWidth, container.clientHeight);
+  });
+
+  // Setup Chart.js for emotion history
+  const chart = new Chart(canvasHistory.getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        {
+          label: 'Senang',
+          borderColor: 'rgb(0, 255, 255)',
+          backgroundColor: 'rgba(0, 255, 255, 0.2)',
+          data: [],
+          tension: 0.3,
+          fill: true,
+        },
+        {
+          label: 'Sedih',
+          borderColor: 'rgb(0, 120, 255)',
+          backgroundColor: 'rgba(0, 120, 255, 0.2)',
+          data: [],
+          tension: 0.3,
+          fill: true,
+        },
+        {
+          label: 'Marah',
+          borderColor: 'rgb(255, 0, 0)',
+          backgroundColor: 'rgba(255, 0, 0, 0.2)',
+          data: [],
+          tension: 0.3,
+          fill: true,
+        },
+        {
+          label: 'Netral',
+          borderColor: 'rgb(150, 150, 150)',
+          backgroundColor: 'rgba(150, 150, 150, 0.2)',
+          data: [],
+          tension: 0.3,
+          fill: true,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        y: { min: 0, max: 1 },
+        x: { display: false }
+      },
+      plugins: {
+        legend: { labels: {color:'#0ff'} }
+      }
+    }
+  });
+
+  // TensorFlow.js dummy (simulated) model for emotion detection (in real case, load a model)
+  // For demo: uses frequency data and simple heuristic
+  function analyzeEmotion(freqData) {
+    // Normalize freqData to 0-1
+    const normData = Array.from(freqData).map(v => v/255);
+
+    // Dummy scores based on energy at frequency bands
+    const lowFreq = normData.slice(0, 15).reduce((a,b)=>a+b,0)/15;
+    const midFreq = normData.slice(15, 35).reduce((a,b)=>a+b,0)/20;
+    const highFreq = normData.slice(35).reduce((a,b)=>a+b,0)/(normData.length-35);
+
+    // Scores between 0 and 1
+    let scores = {
+      senang: highFreq,
+      sedih: lowFreq,
+      marah: midFreq,
+      netral: 1 - Math.min(1, highFreq + lowFreq + midFreq)
+    };
+
+    // Normalize to total 1
+    let total = scores.senang + scores.sedih + scores.marah + scores.netral;
+    for(let k in scores) scores[k] /= total;
+
+    // Determine highest
+    let maxEmotion = Object.entries(scores).reduce((a,b)=>a[1]>b[1]?a:b);
+
+    return { scores, dominant: maxEmotion[0] };
+  }
+
+  // Recommendations based on emotion
+  const recommendations = {
+    senang: "Hebat! Pertahankan suasana hati positif Anda. Lanjutkan aktivitas yang Anda sukai.",
+    sedih: "Jangan ragu untuk berbagi dengan teman atau keluarga. Cobalah meditasi ringan.",
+    marah: "Tarik napas dalam-dalam dan coba rileks sejenak. Hindari keputusan impulsif.",
+    netral: "Kondisi stabil. Pertahankan keseimbangan dan tetap produktif."
+  };
+
+  // Storage for history
+  const maxHistoryLength = 60;
+  let emotionHistory = {
+    senang: [],
+    sedih: [],
+    marah: [],
+    netral: []
+  };
+
+  // Save/load history localStorage
+  function saveHistory() {
+    localStorage.setItem('emotionHistory', JSON.stringify(emotionHistory));
+  }
+  function loadHistory() {
+    const stored = localStorage.getItem('emotionHistory');
+    if(stored){
+      emotionHistory = JSON.parse(stored);
+      // If data too long, slice
+      for(let k in emotionHistory) {
+        if(emotionHistory[k].length > maxHistoryLength) {
+          emotionHistory[k] = emotionHistory[k].slice(-maxHistoryLength);
+        }
+      }
+    }
+  }
+  loadHistory();
+
+  // Update Chart data
+  function updateChart() {
+    let len = emotionHistory.senang.length;
+    chart.data.labels = [...Array(len).keys()].map(i => i+1);
+
+    chart.data.datasets[0].data = emotionHistory.senang;
+    chart.data.datasets[1].data = emotionHistory.sedih;
+    chart.data.datasets[2].data = emotionHistory.marah;
+    chart.data.datasets[3].data = emotionHistory.netral;
+
+    chart.update('none');
+  }
+  updateChart();
+
+  // Setup Web Audio API and start streaming from mic
+  async function startAudio() {
+    audioContext = new AudioContext();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    microphone = audioContext.createMediaStreamSource(stream);
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 128;
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    microphone.connect(analyser);
+  }
+
+  // Update 3D spectrogram bars
+  function updateBars(freqData) {
+    for(let i=0; i<barsCount; i++){
+      const h = freqData[i] / 5 + 1; // scale height
+      bars[i].scale.y = h;
+      bars[i].material.emissiveIntensity = h / 10;
+      bars[i].position.y = h / 2;
+    }
+  }
+
+  // Animate Three.js scene
+  function animateThreeJS() {
+    if(!paused){
+      analyser.getByteFrequencyData(dataArray);
+
+      updateBars(dataArray);
+
+      // Emotion analysis
+      const { scores, dominant } = analyzeEmotion(dataArray);
+      emotionDisplay.textContent = `Emosi: ${dominant.charAt(0).toUpperCase() + dominant.slice(1)} (${(scores[dominant]*100).toFixed(1)}%)`;
+      recommendationDiv.textContent = recommendations[dominant];
+
+      // Update history arrays
+      for(let k in emotionHistory){
+        if(emotionHistory[k].length >= maxHistoryLength) emotionHistory[k].shift();
+        emotionHistory[k].push(scores[k]);
+      }
+      updateChart();
+      saveHistory();
+    }
+    renderer.render(scene, camera);
+    animationId = requestAnimationFrame(animateThreeJS);
+  }
+
+  // UI Control handlers
+  startBtn.onclick = async () => {
+    if(audioContext) {
+      // Stop audio
+      audioContext.close();
+      audioContext = null;
+      cancelAnimationFrame(animationId);
+      startBtn.textContent = 'Mulai Analisis';
+      pauseBtn.disabled = true;
+      emotionDisplay.textContent = 'Emosi: -';
+      recommendationDiv.textContent = '';
+      // Reset bars
+      bars.forEach(b => {
+        b.scale.y = 1;
+        b.position.y = 0.5;
+      });
+      return;
+    }
+    startBtn.textContent = 'Berhenti';
+    pauseBtn.disabled = false;
+    paused = false;
+    await startAudio();
+    animateThreeJS();
+  };
+
+  pauseBtn.onclick = () => {
+    paused = !paused;
+    pauseBtn.textContent = paused ? 'Lanjutkan' : 'Pause';
+  };
+
+  // Initial render
+  renderer.render(scene, camera);
+
+})();
+</script>
+
+</body>
+</html>
